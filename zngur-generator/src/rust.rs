@@ -350,6 +350,12 @@ pub extern "C" fn {mangled_name}(
     struct Wrapper {{ 
         value: ZngurCppOpaqueOwnedObject,
     }}
+
+    /// The C++ code must ensure that it is `Send`.
+    unsafe impl Send for Wrapper {{}}
+
+    /// The C++ code must ensure that it is `Sycn`.
+    unsafe impl Sync for Wrapper {{}}
     impl {trait_without_assocs} for Wrapper {{
 "#
         );
