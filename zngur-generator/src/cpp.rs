@@ -586,6 +586,30 @@ private:
                     ty = self.ty,
                 )?;
             }
+            // Sized refs are a single `size_t data` field, so reconstructing
+            // one from a raw pointer is just a `reinterpret_cast<size_t>`.
+            // This skips the `__zngur_internal_check_init` safety probe and
+            // is meant for FFI shims that already know — by contract — that
+            // the pointer addresses a fully constructed value. Unsized refs
+            // (Slice/Str) carry a `{ptr, len}` pair, so a single-pointer
+            // factory cannot reconstruct them; we omit this overload there.
+            if !is_unsized {
+                let raw_ptr_ty = if ref_kind == "Ref" {
+                    "const void*"
+                } else {
+                    "void*"
+                };
+                writeln!(
+                    state,
+                    r#"
+    static {ref_kind} unsafe_from_raw_ptr({raw_ptr_ty} p) {{
+        {ref_kind} r;
+        r.data = reinterpret_cast<size_t>(p);
+        return r;
+    }}
+    "#,
+                )?;
+            }
             match &self.from_trait_ref {
                 Some(RustTrait::Fn { inputs, output, .. }) => {
                     let as_std_function = format!(
