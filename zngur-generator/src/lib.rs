@@ -30,6 +30,25 @@ impl ZngurGenerator {
     }
 
     pub fn render(self) -> (String, String, Option<String>) {
+        let (rust_file, cpp_file) = self.lower();
+        let (h, cpp) = cpp_file.render();
+        (rust_file.text, h, cpp)
+    }
+
+    /// Like [`render`], but splits the C++ header into a shared `generated_core.h`
+    /// plus one `<module>.h` shard per entry in `externalize`. Returns the Rust
+    /// glue, the list of `(filename, contents)` header shards, and the optional
+    /// C++ -> Rust `.cpp`.
+    pub fn render_split(
+        self,
+        externalize: &[String],
+    ) -> (String, Vec<(String, String)>, Option<String>) {
+        let (rust_file, cpp_file) = self.lower();
+        let (hs, cpp) = cpp_file.render_split(externalize);
+        (rust_file.text, hs, cpp)
+    }
+
+    fn lower(self) -> (RustFile, CppFile) {
         let mut zng = self.0;
 
         // Unit type is a bit special, and almost everyone needs it, so we add it ourself.
@@ -269,8 +288,7 @@ impl ZngurGenerator {
                     .collect(),
             });
         }
-        let (h, cpp) = cpp_file.render();
-        (rust_file.text, h, cpp)
+        (rust_file, cpp_file)
     }
 }
 

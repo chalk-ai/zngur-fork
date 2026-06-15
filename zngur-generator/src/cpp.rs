@@ -736,7 +736,7 @@ inline size_t __zngur_internal_size_of< {ref_kind} < {ty} > >() {{
             .wellknown_traits
             .contains(&ZngurWellknownTraitData::Copy);
         let is_copy_constructible_by_clone = self.is_copy_constructible_by_clone;
-        let is_heap_allocated = matches!(&self.layout, CppLayoutPolicy::HeapAllocated {..});
+        let is_heap_allocated = matches!(&self.layout, CppLayoutPolicy::HeapAllocated { .. });
         writeln!(
             state,
             r#"
@@ -944,7 +944,11 @@ private:
                                 _ => None,
                             })
                             .unwrap();
-                        let data_ptr = if is_heap_allocated { "data" } else { "data.data()" };
+                        let data_ptr = if is_heap_allocated {
+                            "data"
+                        } else {
+                            "data.data()"
+                        };
                         writeln!(
                             state,
                             r#"
@@ -1007,7 +1011,11 @@ private:
                 }
             }
             if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
-                let data_ptr = if is_heap_allocated { "data" } else { "data.data()" };
+                let data_ptr = if is_heap_allocated {
+                    "data"
+                } else {
+                    "data.data()"
+                };
                 writeln!(
                     state,
                     r#"
@@ -1130,7 +1138,11 @@ namespace rust {{
 "#,
                 )?;
             }
-            let data_ptr = if is_heap_allocated { "t.data" } else { "t.data.data()" };
+            let data_ptr = if is_heap_allocated {
+                "t.data"
+            } else {
+                "t.data.data()"
+            };
             writeln!(
                 state,
                 r#"
@@ -1153,7 +1165,7 @@ namespace rust {{
         let is_unsized = self
             .wellknown_traits
             .contains(&ZngurWellknownTraitData::Unsized);
-        let is_heap_allocated = matches!(&self.layout, CppLayoutPolicy::HeapAllocated {..});
+        let is_heap_allocated = matches!(&self.layout, CppLayoutPolicy::HeapAllocated { .. });
         let cpp_type = &self.ty.to_string();
         let my_name = cpp_type.strip_prefix("::").unwrap();
         for c in &self.constructors {
@@ -1370,7 +1382,11 @@ auto data_as_impl = &args;
                     debug_print: _, // TODO: use it
                 } => {
                     if !is_unsized {
-                        let data_ptr = if is_heap_allocated { "t.data" } else { "t.data.data()" };
+                        let data_ptr = if is_heap_allocated {
+                            "t.data"
+                        } else {
+                            "t.data.data()"
+                        };
                         writeln!(
                             state,
                             r#"
@@ -1479,7 +1495,7 @@ pub struct CppFile {
 }
 
 impl CppFile {
-    fn emit_h_file(&self, state: &mut State) -> std::fmt::Result {
+    fn emit_prelude_and_machinery(&self, state: &mut State) -> std::fmt::Result {
         state.text += r#"
 #pragma once
 
@@ -1681,34 +1697,56 @@ namespace rust {
             }
         }
         writeln!(state, "}}")?;
+        Ok(())
+    }
+
+    // Emit the per-type declarations and definitions, restricted to the type
+    // defs accepted by `keep_ty`. When `include_globals` is false the file is a
+    // module shard that #includes the core header, so the shared free functions,
+    // traits and exported (C++ -> Rust) glue are emitted only once, in core.
+    fn emit_decls_and_defs(
+        &self,
+        state: &mut State,
+        keep_ty: &dyn Fn(&CppTypeDefinition) -> bool,
+        include_globals: bool,
+    ) -> std::fmt::Result {
         writeln!(state, "extern \"C\" {{")?;
-        for f in &self.fn_defs {
-            f.sig.emit_rust_link_decl(state)?;
-        }
-        for td in &self.type_defs {
-            td.emit_rust_links(state)?;
-        }
-        for (_, td) in &self.trait_defs {
-            td.emit_rust_links(state)?;
-        }
-        writeln!(state, "}}")?;
-        for td in &self.type_defs {
-            td.ty.emit_header(state)?;
-        }
-        for imp in &self.exported_impls {
-            imp.ty.emit_header(state)?;
-            if let Some(tr) = &imp.tr {
-                tr.emit_header(state)?;
+        if include_globals {
+            for f in &self.fn_defs {
+                f.sig.emit_rust_link_decl(state)?;
             }
         }
-        for (_, td) in &self.trait_defs {
+        for td in self.type_defs.iter().filter(|td| keep_ty(td)) {
+            td.emit_rust_links(state)?;
+        }
+        if include_globals {
+            for (_, td) in &self.trait_defs {
+                td.emit_rust_links(state)?;
+            }
+        }
+        writeln!(state, "}}")?;
+        for td in self.type_defs.iter().filter(|td| keep_ty(td)) {
+            td.ty.emit_header(state)?;
+        }
+        if include_globals {
+            for imp in &self.exported_impls {
+                imp.ty.emit_header(state)?;
+                if let Some(tr) = &imp.tr {
+                    tr.emit_header(state)?;
+                }
+            }
+            for (_, td) in &self.trait_defs {
+                td.emit(state)?;
+            }
+        }
+        for td in self.type_defs.iter().filter(|td| keep_ty(td)) {
             td.emit(state)?;
         }
-        for td in &self.type_defs {
-            td.emit(state)?;
-        }
-        for td in &self.type_defs {
+        for td in self.type_defs.iter().filter(|td| keep_ty(td)) {
             td.emit_cpp_fn_defs(state, &self.trait_defs)?;
+        }
+        if !include_globals {
+            return Ok(());
         }
         for fd in &self.fn_defs {
             fd.emit_cpp_def(state)?;
@@ -1748,6 +1786,70 @@ namespace rust {
             writeln!(state, "}}; }}")?;
         }
         Ok(())
+    }
+
+    fn emit_h_file(&self, state: &mut State) -> std::fmt::Result {
+        self.emit_prelude_and_machinery(state)?;
+        self.emit_decls_and_defs(state, &|_| true, true)?;
+        Ok(())
+    }
+
+    // A C++ type belongs to `module` if that module name appears as a path
+    // segment of the type or, recursively, of any of its generic arguments.
+    // This lets a monomorphization like `Result<EncodedInput, ChalkTokenizerError>`
+    // follow its payload into the tokenizer shard instead of bloating core.
+    fn cpp_type_in_module(ty: &CppType, module: &str) -> bool {
+        ty.path.0.iter().any(|s| s == module)
+            || ty
+                .generic_args
+                .iter()
+                .any(|g| Self::cpp_type_in_module(g, module))
+    }
+
+    // Like `render`, but partitions the C++ header into a shared `generated_core.h`
+    // plus one `<module>.h` shard per entry in `externalize`. Each shard #includes
+    // core, so the machinery and shared std/arrow types are defined exactly once.
+    // The Rust glue and the C++ -> Rust `.cpp` are unaffected (single compilation).
+    pub fn render_split(&self, externalize: &[String]) -> (Vec<(String, String)>, Option<String>) {
+        let mut files: Vec<(String, String)> = Vec::new();
+
+        let is_ext = |td: &CppTypeDefinition| {
+            externalize
+                .iter()
+                .any(|m| Self::cpp_type_in_module(&td.ty, m))
+        };
+
+        // generated_core.h: machinery + everything not assigned to a shard.
+        let mut core = State {
+            text: String::new(),
+            panic_to_exception: self.panic_to_exception,
+        };
+        self.emit_prelude_and_machinery(&mut core).unwrap();
+        self.emit_decls_and_defs(&mut core, &|td| !is_ext(td), true)
+            .unwrap();
+        files.push(("generated_core.h".to_owned(), core.text));
+
+        // One shard per externalized module; each pulls in the shared core.
+        for m in externalize {
+            let mut s = State {
+                text: String::new(),
+                panic_to_exception: self.panic_to_exception,
+            };
+            s.text += "\n#pragma once\n#include \"rust_utilities/generated_core.h\"\n";
+            self.emit_decls_and_defs(&mut s, &|td| Self::cpp_type_in_module(&td.ty, m), false)
+                .unwrap();
+            files.push((format!("{m}.h"), s.text));
+        }
+
+        // generated.cpp is unchanged; it includes the umbrella generated.h.
+        let mut cpp_file = State {
+            text: String::new(),
+            panic_to_exception: self.panic_to_exception,
+        };
+        let mut is_cpp_needed = false;
+        self.emit_cpp_file(&mut cpp_file, &mut is_cpp_needed)
+            .unwrap();
+        (files, is_cpp_needed.then_some(cpp_file.text))
     }
 
     fn emit_cpp_file(&self, state: &mut State, is_really_needed: &mut bool) -> std::fmt::Result {
