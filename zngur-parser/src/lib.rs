@@ -462,7 +462,9 @@ impl ProcessedItem<'_> {
                 }
             }
             ProcessedItem::ModuleImport { path, span: _ } => {
-                r.spec.imported_modules.push(ModuleImport { path: path.clone() });
+                r.spec
+                    .imported_modules
+                    .push(ModuleImport { path: path.clone() });
             }
             ProcessedItem::Type {
                 ty,
@@ -975,7 +977,6 @@ impl<'a, 'b> ParseContext<'a, 'b> {
         // Always cache the source in case errors come up in post-processing
         self.source_cache.insert(other.path, other.text.to_string());
         self.source_cache.extend(other.source_cache);
-
     }
 
     fn has_errors(&self) -> bool {
@@ -1130,6 +1131,36 @@ impl<'a> ParsedZngFile<'a> {
         }
     }
 
+    /// Gross hack to figure out which types are defined in imported zngur modules
+    fn collect_imported_types(
+        ctx: &mut ParseContext,
+        modules: &[ModuleImport],
+        imported_types: &mut HashSet<RustType>,
+    ) {
+        for m in modules {
+            let mut zngur = ZngurSpecBuilder::default();
+            zngur.spec.rust_cfg.extend(ctx.cfg_provider.get_cfg_pairs());
+            let parent = ctx.path.parent().unwrap();
+            let text = (DefaultImportResolver)
+                .resolve_import(&parent, &m.path)
+                .unwrap();
+            let mut nested_ctx = ParseContext::with_depth(
+                parent.join(&m.path),
+                &text,
+                ctx.depth + 1,
+                ctx.get_config_provider().clone_box(),
+            );
+            ParsedZngFile::parse_into(&mut zngur, &mut nested_ctx, &DefaultImportResolver);
+            imported_types.extend(zngur.spec.types.iter().map(|ty| ty.ty.clone()));
+            collect_imported_types(
+                &mut nested_ctx,
+                &zngur.spec.imported_modules,
+                imported_types,
+            );
+            ctx.consume_from(nested_ctx);
+        }
+    }
+
     /// Parse a .zng file and return both the spec and list of all processed files.
     pub fn parse(path: std::path::PathBuf, cfg: Box<dyn RustCfgProvider>) -> ParseResult {
         let mut zngur = ZngurSpecBuilder::default();
@@ -1138,6 +1169,11 @@ impl<'a> ParsedZngFile<'a> {
         let text = std::fs::read_to_string(&path).unwrap();
         let mut ctx = ParseContext::new(path.clone(), &text, cfg.clone_box());
         Self::parse_into(&mut zngur, &mut ctx, &DefaultImportResolver);
+        Self::collect_imported_types(
+            &mut ctx,
+            &zngur.spec.imported_modules,
+            &mut zngur.imported_types,
+        );
         let spec = zngur.to_zngur(&mut ctx);
         if ctx.has_errors() {
             // add report of cfg values used
@@ -1298,6 +1334,7 @@ struct TemplateDef {
 struct ZngurSpecBuilder {
     spec: ZngurSpec,
     templates: Vec<TemplateDef>,
+    imported_types: HashSet<RustType>,
     ty_to_locations: HashMap<RustType, Vec<(String, std::ops::Range<usize>)>>,
     imports: Vec<Import>,
 }
@@ -1306,11 +1343,13 @@ impl ZngurSpecBuilder {
     fn to_zngur(self, ctx: &mut ParseContext) -> ZngurSpec {
         let ZngurSpecBuilder {
             mut spec,
+            imported_types,
             templates,
             imports: _,
             mut ty_to_locations,
         } = self;
-        let defined_types = spec.types.iter().map(|ty| ty.ty.clone()).collect();
+        let mut defined_types = imported_types;
+        defined_types.extend(spec.types.iter().map(|ty| ty.ty.clone()));
         for ty in &mut spec.types {
             let mut template_locations = Vec::new();
             for template in &templates {
@@ -1350,12 +1389,11 @@ impl ZngurSpecBuilder {
                 ty.wellknown_traits.push(ZngurWellknownTrait::Drop);
             }
             if ty.layout.is_none() {
-                let mut report = Report::build(ReportKind::Error, "", 0)
-                    .with_message(format!(
-                        "No layout policy found for type {}. \
+                let mut report = Report::build(ReportKind::Error, "", 0).with_message(format!(
+                    "No layout policy found for type {}. \
     Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`.",
-                        ty.ty
-                    ));
+                    ty.ty
+                ));
                 for location in ty_to_locations.remove(&ty.ty).unwrap_or_default() {
                     report = report.with_label(
                         Label::new(location)
