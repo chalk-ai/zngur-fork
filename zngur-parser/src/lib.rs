@@ -1152,7 +1152,7 @@ impl<'a> ParsedZngFile<'a> {
             );
             ParsedZngFile::parse_into(&mut zngur, &mut nested_ctx, &DefaultImportResolver);
             imported_types.extend(zngur.spec.types.iter().map(|ty| ty.ty.clone()));
-            collect_imported_types(
+            Self::collect_imported_types(
                 &mut nested_ctx,
                 &zngur.spec.imported_modules,
                 imported_types,
